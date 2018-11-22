@@ -1,26 +1,26 @@
 
 /* global twttr */
 const marked = require('marked')
-const Prism = require('prismjs');
+const Prism = require('prismjs')
+const { maybe } = require('static-sum-type/modules/yslashn')
+const { bifold } = require('static-sum-type')
 const navbar = require('./navbar')
 const Posts = require('./posts')
+
+const { Route } = require('../src/route')
 
 require('prismjs/components/prism-json');
 require('prismjs/components/prism-bash');
 
 const m = require('mithril')
-m.stream = require('mithril/stream')
+const stream = require('mithril/stream')
+const dropRepeats = require('../src/drop-repeats')
 
-/* globals scrollTo */
+const Loaded = maybe('Loaded')
 
-function scrollTop(){
-    scrollTo(
-        { top: 0
-        , behavior: 'smooth'
-        }
-    )
-}
-
+const True = () => true
+const False = () => false
+const then = f => p => p.then(f)
 
 function Twitter(vnode){
 
@@ -29,10 +29,10 @@ function Twitter(vnode){
 
 		vnode.dom.innerHTML = ""
 
-		if(post() && post().twitter && post().path){
+		if(post && post.twitter && post.path){
 			try {
 				return twttr.widgets.createTweet(
-					post().twitter,
+					post.twitter,
 					vnode.dom,
 					{ theme: 'light' }
 				)
@@ -50,96 +50,208 @@ function Twitter(vnode){
 	}
 }
 
-function Post({ attrs:{postBody, post}}){
+const isPostLoaded = isPostLoaded => 
+	bifold (Loaded) (False, True) (isPostLoaded.post)
 
+const assertLoaded = x => bifold (Loaded) ( () => [],  x => [x]) (x)
+
+const Post = () => model => {
+
+	// todo-james make a service
+	// store when renders happen as data so a service can
+	// trigger after the render after a post loads
 	const highlightCode =
 		x => [x]
-			.filter( () => postBody() )
+			.filter( () => isPostLoaded(model) )
 			.forEach(
-				() => {
-					Prism.highlightAll()
+				() => Prism.highlightAll()
+			)
+
+	
+	return m('div.post'
+		,m('div', 
+			{ oncreate: highlightCode
+			, key: 
+				isPostLoaded( model )
+				&& model.post.value.path 
+					+ model.post.value.body.length
+				
+			}
+			, [model.post]
+				.flatMap( assertLoaded )
+				.map( x => m.trust(x.body) )
+		)
+		,m('br')
+		,[ model.post ]
+			.flatMap( assertLoaded )
+			.map( x => x.meta )
+			.flatMap( assertLoaded )
+			.map( meta => 
+				m(Twitter
+					, { post: meta, key: meta.path }
+				)
+			)
+	)
+}
+
+const service = theirModel$ => {
+
+	const update$ = stream()
+
+	
+	const routeModel$ = 
+		dropRepeats( ({ route }) => ({ route }) ) ( theirModel$ )
+
+	const metaModel$ = 
+		dropRepeats( ({ post }) => ({ post }) ) ( theirModel$ )
+
+	const loadedMeta = ({ post }) =>
+		[post]
+			.flatMap( 
+				x => bifold ( Loaded ) (
+					() => [],
+					post => [post.meta]
+				) (x)
+			)
+			.flatMap(
+				x => bifold (Loaded) (
+					() => [],
+					(meta) => [meta]
+				) (x)
+			)
+
+	metaModel$.map(
+		model => 
+			loadedMeta(model)
+			.map(
+				({ name }) => ['James Forbes - '+name]
+			)
+			.concat('James Forbes')
+			.slice(0,1)
+			.map(
+				// eslint-disable-next-line
+				s => document.title = s
+			)
+	)
+
+	
+	metaModel$.map(
+		model => 
+			loadedMeta(model)
+			.map(
+				({ name }) => ['James Forbes - '+name]
+			)
+			.concat('James Forbes')
+			.slice(0,1)
+			.map(
+				// eslint-disable-next-line
+				s => document.title = s
+			)
+	)
+
+	metaModel$.map(
+		model => loadedMeta(model)
+			.map(
+				() => setTimeout(
+					// eslint-disable-next-line no-undef
+					() => scrollTo(
+						{ top: 0
+						, behavior: 'smooth'
+						}
+					)
+					,500
+				)
+			)
+	)
+
+
+
+	// Cache promise to ensure blog html fetched after metadata fetched
+	// while also avoiding refetching again and again
+	const fetchingPostsJSON = m.request('/posts.json')
+	
+	const fetchBlogHTML = x =>
+		fetchingPostsJSON.then(
+			() => m.request(
+				{ url: x+'.md'
+				, headers: { "Content-Type": "text/markdown" }
+				, deserialize: marked
 				}
 			)
-
+		)
 	
-	return {
-		oncreate: () => setTimeout(scrollTop,1000)
-		,view: () => 
-			m('div.post'
-				,m('div', 
-					{ oncreate: highlightCode
-					, key: 
-						(post() && post().path) 
-						+ (postBody() && postBody().length)
+	fetchingPostsJSON
+		.then(
+			posts => Loaded.Y(posts)
+		)
+		.then(
+			posts => update$( model => Object.assign({}, model, { posts }) )
+		)
+
+	routeModel$.map(
+		model => {
+
+			const path = 
+				Route.fold(
+					{ List: () => []
+					, Post: ({ path }) => [path]
 					}
-					,m.trust(postBody())
-				)
-				,m('br')
-				,post() 
-				&& m(Twitter, { post, key: post().path })
+				) (model.route)
+
+			path
+			.map(
+				path => fetchBlogHTML(path)
+					.then(
+						body =>  
+							({ body
+							, path
+							, meta:
+								bifold ( Loaded ) (
+									() => [],
+									xs => xs
+								) (theirModel$().posts)
+								// Technically the meta data may not be
+								// found (old url no longer in posts.json)
+								.filter( x => x.path == '/posts/'+path+'.md' )
+								.slice(0,1)
+								.map( Loaded.Y )
+								.concat( Loaded.N() )
+								.shift()
+							})
+					)
 			)
-	}
+			.map( then(Loaded.Y) )
+			.concat(
+				Promise.resolve( Loaded.N() )
+			)
+			.slice(0,1)
+			.map(
+				then(
+					post => update$(
+						model => Object.assign({}, model, { post })
+					)
+				)
+			)
+			.map( x => x.catch(console.error) )
+
+			return null
+		}
+	)
+
+	return update$
 }
 
-function PostsModel(){
-	const fetchBlogHTML = x =>
-		[ x => m.request(
-			{ url: x
-			, headers: { "Content-Type": "text/markdown" }
-			, deserialize: marked
-			}
-		)
-		, postBody
-		]
-		.reduce( (x, f) => x.then(f), Promise.resolve(x) )
-		.catch( console.error )
-
-	const markdown_url = m.stream()
-
-	if(m.route.param('key')){
-		markdown_url( 'posts/'+m.route.param('key') + '.md')
-	}
-
-	const postBody = m.stream()
-
-	postBody.map( () => m.redraw() )
+const component = update => model => {
 	
-	markdown_url.map(fetchBlogHTML)
-
-	//so the sidebar doesn't redraw with an empty posts.json every redraw
-	const posts = m.stream()
-	
-	const post = posts.map(function(posts){
-		const murl = markdown_url()
-		return posts.find( x => x.path === murl ) || {}
-	})
-
-	m.request('posts.json')
-		.then(posts)
-		.catch( console.error )
-		.then( () => m.redraw() )
-		
-
-	return {
-		postBody: postBody
-		,post: post
-		,posts: posts
-	}
+	return m('div.container'
+		,navbar(update)(model)
+		,Post(update)(model)
+		,m('br')
+		,Posts(update)(model)
+	)
 }
 
-function PostsContainerView(){
-
-	const model = PostsModel()
-	const view = function(){
-		return m('div.container'
-			,navbar
-			,m(Post, model)
-			,m('br')
-			,m(Posts)
-		)
+module.exports = 
+	{ component
+	, service
 	}
-
-	return { view }
-}
-
-module.exports = PostsContainerView
